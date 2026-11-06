@@ -152,6 +152,41 @@ def enrich_context(
         f"[장기 메모리]\n- {memory_text}\n"
         "목록에 없는 책은 있다고 말하지 마세요. 다른 이용자의 대출 정보는 말하지 마세요."
     ).strip()
+    # 명확한 선호 저장·조회에는 과거 검색/추천 도구 기록과 전체 도구 스키마가
+    # 필요하지 않다. 체크포인터의 대화는 유지하고 이번 모델 입력만 줄인다.
+    messages = list(getattr(request, "messages", []))
+    human_index = next((i for i in range(len(messages) - 1, -1, -1)
+                        if getattr(messages[i], "type", None) == "human"), None)
+    if human_index is not None:
+        text = messages[human_index].content
+        q = compact(text) if isinstance(text, str) else ""
+        save_preference = "선호" in q and any(
+            word in q for word in ("저장해", "저장하", "저장부탁", "저장좀", "기억해")
+        )
+        save_preference = save_preference and not any(
+            word in q for word in ("저장하지", "기억하지", "저장안", "저장말", "저장은하지", "기억은하지")
+        )
+        read_preference = any(word in q for word in ("내선호", "내독서선호")) and any(
+            word in q for word in ("조회", "알려", "뭐", "보여")
+        )
+        if (save_preference or read_preference) and not library_tool_requests(text):
+            memory_tool = save_user_info if save_preference else get_user_info
+            current = messages[human_index:]
+            completed = [message for message in current
+                         if getattr(message, "type", None) == "tool"
+                         and getattr(message, "name", "") == memory_tool.name
+                         and getattr(message, "status", "success") == "success"]
+            if completed:
+                answer = "이름과 독서 선호를 저장했습니다." if save_preference else completed[-1].content
+                return ModelResponse(result=[AIMessage(content=answer)])
+            prompt += (
+                "\n현재 요청은 이용자의 독서 선호 저장 또는 조회입니다. 반드시 해당 기억 도구를 사용하세요. "
+                "save_user_info의 user_info에는 personal_information과 preference를 문자열로 넣습니다. "
+                f"personal_information에는 이용자가 밝힌 실제 이름을 넣습니다. 현재 이용자 이름은 {user_name}입니다. "
+                "preference에는 현재 질문에서 밝힌 실제 독서 선호를 넣습니다. "
+                "현재 질문에 명시된 내용을 저장하며 없는 정보를 만들지 마세요."
+            )
+            return handler(request.override(system_prompt=prompt, messages=current, tools=[memory_tool]))
     return handler(request.override(system_prompt=prompt))
 
 
